@@ -77,26 +77,24 @@ def parse_file(path: str):
 
         elif rec_type == REC_CALLBACK_IN:
             p = 0
-            seq,      p = read_u64(payload, p)
-            api,      p = read_u32(payload, p)
-            inlen,    p = read_u32(payload, p)
-            input_buf = payload[p:p+inlen]; p += inlen
-            rip,  p = read_u64(payload, p)
-            rsp,  p = read_u64(payload, p)
-            rcx,  p = read_u64(payload, p)
-            rdx,  p = read_u64(payload, p)
-            r8,   p = read_u64(payload, p)
-            slen, p = read_u32(payload, p)
-            stack_snap = payload[p:p+slen]
+            seq,       p = read_u64(payload, p)
+            api,       p = read_u32(payload, p)
+            inlen,     p = read_u32(payload, p)
+            input_buf  = payload[p:p+inlen]; p += inlen
+            rip,   p = read_u64(payload, p)
+            rsp,   p = read_u64(payload, p)
+            input_ptr, p = read_u64(payload, p)
+            flen,  p = read_u32(payload, p)
+            frame_dump = payload[p:p+flen]
             rec.update(
                 seq=seq, api=api,
                 input=input_buf.hex(),
                 input_bytes=list(input_buf),
+                input_ptr=hex(input_ptr),
                 rip=hex(rip), rsp=hex(rsp),
-                rcx=hex(rcx), rdx=hex(rdx), r8=hex(r8),
-                stack=stack_snap.hex(),
+                frame=frame_dump.hex(),
             )
-            print(f"  CALLBACK_IN  seq={seq:<4}  api={api:<4}  inlen={inlen}")
+            print(f"  CALLBACK_IN  seq={seq:<4}  api={api:<4}  inlen={inlen}  inptr={hex(input_ptr)}")
 
         elif rec_type == REC_CALLBACK_OUT:
             p = 0
@@ -171,8 +169,8 @@ def write_h5(records, qpc_freq, out_path):
             ci.create_dataset('seq',    data=np.array([r['seq'] for r in cb_in],   dtype=np.uint64))
             ci.create_dataset('api',    data=np.array([r['api'] for r in cb_in],   dtype=np.uint32))
             ci.create_dataset('time_s', data=np.array([r['time_s'] for r in cb_in], dtype=np.float64))
-            # variable-length byte arrays stored as fixed-size padded arrays
-            max_in = max((len(r['input_bytes']) for r in cb_in), default=0)
+            # input data (variable-length, padded)
+            max_in = max((len(r['input_bytes']) for r in cb_in), default=1)
             in_arr = np.zeros((len(cb_in), max_in), dtype=np.uint8)
             in_len = np.zeros(len(cb_in), dtype=np.uint32)
             for i, r in enumerate(cb_in):
@@ -181,11 +179,16 @@ def write_h5(records, qpc_freq, out_path):
                 in_len[i] = len(b)
             ci.create_dataset('input_data',   data=in_arr)
             ci.create_dataset('input_length', data=in_len)
+            ci.create_dataset('input_ptr', data=np.array([int(r['input_ptr'], 16) for r in cb_in], dtype=np.uint64))
             ci.create_dataset('rip', data=np.array([int(r['rip'], 16) for r in cb_in], dtype=np.uint64))
             ci.create_dataset('rsp', data=np.array([int(r['rsp'], 16) for r in cb_in], dtype=np.uint64))
-            ci.create_dataset('rcx', data=np.array([int(r['rcx'], 16) for r in cb_in], dtype=np.uint64))
-            ci.create_dataset('rdx', data=np.array([int(r['rdx'], 16) for r in cb_in], dtype=np.uint64))
-            ci.create_dataset('r8',  data=np.array([int(r['r8'],  16) for r in cb_in], dtype=np.uint64))
+            # KCALLOUT_FRAME raw dump (256 bytes each)
+            max_f = max((len(bytes.fromhex(r.get('frame',''))) for r in cb_in), default=1)
+            f_arr = np.zeros((len(cb_in), max_f), dtype=np.uint8)
+            for i, r in enumerate(cb_in):
+                fb = bytes.fromhex(r.get('frame', ''))
+                f_arr[i, :len(fb)] = list(fb)
+            ci.create_dataset('frame_dump', data=f_arr)
 
         # Callbacks OUT
         co = g.create_group('callbacks_out')
@@ -221,7 +224,7 @@ def write_json(records, out_path):
     # keep them in 'input' and 'output' as hex strings
     def slim(r):
         s = {k: v for k, v in r.items()
-             if k not in ('stack', 'input_bytes', 'output_bytes')}
+             if k not in ('frame', 'input_bytes', 'output_bytes')}
         return s
     with open(out_path, 'w') as f:
         json.dump({'records': [slim(r) for r in records]}, f, indent=2)

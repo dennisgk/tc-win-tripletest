@@ -134,19 +134,33 @@ static std::stack<uint64_t> g_cb_stack;
 /* ---------- event handlers ---------- */
 static void on_callback_in(const CONTEXT &ctx) {
     /*
-     * On x64 Windows 10/11, KiUserCallbackDispatcher entry convention:
-     *   RCX = ApiNumber  (ULONG — index into PEB.KernelCallbackTable)
-     *   RDX = InputBuffer pointer
-     *   R8  = InputBufferLength
+     * KiUserCallbackDispatcher on Windows 10/11 x64 (verified by disassembly):
+     *
+     *   The kernel sets up a KCALLOUT_FRAME on the user-mode stack at RSP,
+     *   then jumps here.  The first three instructions of the function read
+     *   the frame fields:
+     *
+     *     mov rcx,  [rsp+0x20]   ; InputBuffer pointer
+     *     mov edx,  [rsp+0x28]   ; InputBufferLength (ULONG)
+     *     mov r8d,  [rsp+0x2c]   ; ApiNumber         (ULONG)
+     *
+     *   Registers at entry (RCX/RDX/R8) are whatever the kernel left there
+     *   and are NOT the parameters — read directly from [RSP+offset].
      */
-    uint32_t  api   = (uint32_t)ctx.Rcx;
-    uintptr_t inptr = (uintptr_t)ctx.Rdx;
-    uint32_t  inlen = (uint32_t)ctx.R8;
+    uintptr_t rsp = (uintptr_t)ctx.Rsp;
 
-    auto input_data = rmem(inptr, inlen);
-    /* Stack snapshot: 16 bytes before RSP + 144 bytes after */
-    uintptr_t sp = ctx.Rsp;
-    auto stack_snap = rmem(sp >= 16 ? sp - 16 : sp, 160);
+    uint64_t input_ptr = 0;
+    uint32_t input_len = 0;
+    uint32_t api       = 0;
+    SIZE_T   nr;
+    ReadProcessMemory(g_proc, (LPCVOID)(rsp + 0x20), &input_ptr, 8, &nr);
+    ReadProcessMemory(g_proc, (LPCVOID)(rsp + 0x28), &input_len, 4, &nr);
+    ReadProcessMemory(g_proc, (LPCVOID)(rsp + 0x2C), &api,       4, &nr);
+
+    auto input_data = rmem(input_ptr, input_len);
+
+    /* Full KCALLOUT_FRAME dump: 256 bytes at RSP */
+    auto frame_dump = rmem(rsp, 256);
 
     uint64_t seq = ++g_seq;
     g_cb_stack.push(seq);
@@ -154,22 +168,22 @@ static void on_callback_in(const CONTEXT &ctx) {
     uint32_t payload =
         8/*seq*/ + 4/*api*/ +
         4/*input_len*/ + (uint32_t)input_data.size() +
-        8/*rip*/ + 8/*rsp*/ + 8/*rcx*/ + 8/*rdx*/ + 8/*r8*/ +
-        4/*stack_len*/ + (uint32_t)stack_snap.size();
+        8/*rip*/ + 8/*rsp*/ + 8/*input_ptr*/ +
+        4/*frame_len*/ + (uint32_t)frame_dump.size();
 
     begin_rec(REC_CALLBACK_IN, payload);
     wu64(seq);
     wu32(api);
     wu32((uint32_t)input_data.size());
     if (!input_data.empty()) wb(input_data.data(), input_data.size());
-    wu64(ctx.Rip); wu64(ctx.Rsp);
-    wu64(ctx.Rcx); wu64(ctx.Rdx); wu64(ctx.R8);
-    wu32((uint32_t)stack_snap.size());
-    if (!stack_snap.empty()) wb(stack_snap.data(), stack_snap.size());
+    wu64(ctx.Rip); wu64(rsp); wu64(input_ptr);
+    wu32((uint32_t)frame_dump.size());
+    if (!frame_dump.empty()) wb(frame_dump.data(), frame_dump.size());
     fflush(g_out);
 
-    wprintf(L"  CALLBACK_IN  seq=%-4llu api=%-4u inlen=%-5u\n",
-            (unsigned long long)seq, api, (uint32_t)input_data.size());
+    wprintf(L"  CALLBACK_IN  seq=%-4llu api=%-4u inlen=%-5u inptr=0x%llx\n",
+            (unsigned long long)seq, api, input_len,
+            (unsigned long long)input_ptr);
 }
 
 static void on_callback_out(const CONTEXT &ctx) {

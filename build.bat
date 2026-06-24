@@ -1,8 +1,9 @@
 @echo off
 REM Build tripletest.exe with MSVC
-REM Run from a "Developer Command Prompt for VS 20xx" window.
+REM IMPORTANT: run from "x64 Native Tools Command Prompt for VS 20xx"
+REM (not the plain Developer Command Prompt - the CONTEXT struct is x64-only)
 
-cl.exe /EHsc /W3 /O2 /nologo main.cpp ^
+cl.exe /EHsc /W3 /O2 /nologo /D_CRT_SECURE_NO_WARNINGS main.cpp ^
     /Fe:tripletest.exe ^
     /link kernel32.lib user32.lib psapi.lib
 
